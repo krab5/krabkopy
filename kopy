@@ -1,0 +1,284 @@
+#!/usr/bin/perl
+
+=begin
+kopy is a perl script to copy some files from a local to a remote directory.
+
+It uses a hidden JSON configuration file to proceed.
+
+Author: krab
+=cut
+
+use warnings;
+use 5.18.2;
+use Net::SCP qw( scp );
+use JSON::XS qw( encode_json decode_json );
+use File::Basename qw( basename );
+
+our $configfilepath = ".copyproject";
+our $helptxt = <<"END_HELP";
+**************************************************************************
+*              COPYPROJECT -- REMOTE FILE COPYING UTILITY                *
+*                       by krab, v 1.0                                   *
+**************************************************************************
+Abstract:
+    This script is a tool for copying several files to a remote place
+
+Usage:
+    copyproject [-u <user>] [-h host] [-d dest] [-f[r] <file1> [...]] [-c] [-p] [-sr]
+
+Options:
+    -u <user>       Set the user for the SCP call
+    -h <host>       Set the host for the SCP call
+    -d <dest>       Set the destination directory where to put the files (default is ~)
+
+    -f[r]           Add a file to send. You can also specify a whole directory, and even wildcarded
+                    pathes (such as *.txt)
+    -r              Remove a file to send.
+
+    -p              Print current options
+    -c              Clear configuration
+    -s[f]           Send everything there is to send with the configuration.
+                    copyproject keeps track of files that have been sent, and only send recently
+                    modified files.
+                    You can disable this behaviour by using -sf instead of -s.
+
+Note:
+    For this script to be used, you must have set up a proper SSH client/server with
+a RSA key (no password will be asked).
+
+Example:
+    Set user:
+        copyproject.pl -u krab
+
+    Set host and destination:
+        copyproject.pl -h krabihost -d ~/krabidest
+
+    Add some files and directories:
+        copyproject.pl -f *.h *.cpp Makefile tests/ 
+
+    Print your art:
+        copyproject.pl -p
+
+    Send everything:
+        copyproject.pl -s
+
+    Or, if you're fan of one-liner:
+        copyproject.pl -u krab -h krabihost -d ~/krabidest -f *.h *.cpp Makefile tests/ -p -s
+
+
+END_HELP
+
+# Add one file/a directory/several files by wildcard to the config object
+sub add_file {
+    # Arguments
+    my $obj = shift;            # The configuration object
+    my $filepath = shift;       # Filepath to consider
+    my $recursive = shift;      # Are we recursive ? (in the case where we process directories)
+    my $prefix = shift // "";   # Nice formatting
+
+    if (-d $filepath) {
+        # This is a directory
+        say "${prefix}Appending whole directory $filepath...";
+        opendir(my $dir, $filepath) or die "Cannot open directory $filepath : $!";
+        while (my $f = readdir($dir)) {
+            # If it is a file; or if it is a directory while we are recursive, except "." and ".."
+            if (($recursive and basename($filepath) ne ".." and basename($filepath) ne ".") or -f "$filepath/$f") {
+                # Add file
+                add_file($obj, "$filepath/$f", 1, "  ");
+            }
+        }
+    } elsif (-f $filepath) {
+        # This is a simple file
+        $obj->{files}->{"$filepath"} = 1;
+        say "${prefix}=> Added $filepath";
+    } elsif (index($filepath, '*') != -1) {
+        # This is a wildcarded path
+        $filepath =~ s/\./\\\./g; # Set up regex. Something like ".*" actually means "\..*"
+        $filepath =~ s/\*/\.\*/g;
+
+        opendir(my $dir, '.') or die "Cannot open directory : $!";
+        while (my $f = readdir($dir)) {
+            if (-f "$f" and $f =~ m/$filepath/) { # We only add files (no recursivity here)
+                add_file($obj, $f, 0, $prefix);
+            }
+        }
+    } else {
+        die "I don't know how to treat this '$filepath' you gave me :(";
+    }
+}
+
+# Return the variable or "undef" as a string
+sub val_or_undef {
+    my $var = shift;
+
+    if (defined $var) {
+        return "$var";
+    } else {
+        return "undef";
+    }
+}
+
+# Determines if we must update the file
+sub must_update {
+    my $file = shift;
+    my $time = shift;
+
+    return ($time <= (stat($file))[9]); # Check last mod. time
+}
+
+### Main ###
+# Config file
+my $cfgobj;
+if (-f $configfilepath) {
+    open(my $cfgfile, '<', $configfilepath);
+    {
+        local $/ = undef;
+        my $ct = <$cfgfile>;
+        close $cfgfile;
+        $cfgobj = decode_json ($ct);
+    }
+} else {
+    $cfgobj = {};
+}
+
+# Parsing options
+my $send;
+my $print;
+my $clear;
+my $force;
+
+while (my $opt = shift) {
+    if ($opt eq "--help") {
+        # Print help
+        print $helptxt;
+    } elsif ($opt eq "-u") {
+        # Set user
+        my $nxt = shift;
+        if ($nxt =~ m/^-.*/) { die "You must specify an argument after -u"; }
+        $cfgobj->{user} = $nxt;
+        say "Set user.";
+    } elsif ($opt eq "-h") {
+        # Set host
+        my $nxt = shift;
+        if ($nxt =~ m/^-.*/) { die "You must specify an argument after -h"; }
+        $cfgobj->{host} = $nxt;
+        say "Set host.";
+    } elsif ($opt eq "-d") {
+        # Set destination
+        my $nxt = shift;
+        if ($nxt =~ m/^-.*/) { die "You must specify an argument after -d"; }
+        $cfgobj->{dest} = $nxt;
+        say "Set destination";
+    } elsif ($opt eq "-f" or $opt eq "-fr") {
+        # Append files
+        my $file = shift;
+        while ($file and $file !~ m/^-.*/) {
+            add_file($cfgobj, $file, ($opt eq "-fr"));
+            $file = shift;
+        }
+
+        if (defined $file) {
+            unshift @ARGV, $file;
+        }
+    } elsif ($opt eq "-r") {
+        # Remove files
+        my $nxt = shift;
+        if ($nxt =~ m/^-.*/) { die "You must specify an argument after -r"; }
+        if (defined $cfgobj->{files}->{$nxt}) {
+            delete $cfgobj->{files}->{$nxt};
+        } else {
+            warn "$nxt: no such file or directory has been added to config file";
+        }
+    } elsif ($opt eq "-p") {
+        # Print the config
+        $print = 1;
+    } elsif ($opt eq "-s" or $opt eq "-sf") {
+        # Send the files according to config
+        $send = 1;
+
+        if ($opt eq "-sf") {
+            # Force sending, even if there is no need in sending the file (according to the script)
+            $force = 1;
+        }
+    } elsif ($opt eq "-c") {
+        # Clear the configuratoin
+        $clear = 1;
+    } else {
+        say "Unrecognized option '$opt'.";
+    }
+}
+
+# Treat command
+
+if ($send) {
+    # Retrieve options
+    my $user = $cfgobj->{user}  or die "Error: no user defined !\nRun 'copyproject.pl -u <user>' to specify one.";
+    my $host = $cfgobj->{host}  or die "Error: no user defined !\nRun 'copyproject.pl -u <user>' to specify one.";
+    my $files= $cfgobj->{files};
+    my $dest = $cfgobj->{dest}  or warn "Warning: no destination specified. We'll use ~";
+
+    # Default directory : ~/
+    if (not defined $dest) { $dest = "~/"; }
+
+    # Normalize directory name to avoid "blabla//"
+    if ((substr $dest, -1) ne "/") {
+        $dest .= "/";
+    }
+
+    if (defined $files) {
+        say "Sending to ", $cfgobj->{user}, "@", $cfgobj->{host}, "...";
+
+        # Create the SCP object
+        my $scp = Net::SCP->new($cfgobj->{host}, $cfgobj->{user});
+        for my $f (keys %$files) {
+            # For each file, determines if must update (either because of time or because of FORCE)
+            if ($force or must_update($f,$cfgobj->{files}->{$f})) {
+                say "  => sending file $f to $dest$f";
+                $scp->put($f, $dest) or warn "Cannot proceed : $scp->{errstr}";
+                $cfgobj->{files}->{$f} = time; # We set a new time to know whenever this file has been sent
+            } else {
+                say "  => ignoring file $f";
+            }
+        }
+    } else {
+        say "No file to send.";
+    }
+
+}
+
+# Print the config
+if ($print) {
+    say "User:         ", val_or_undef($cfgobj->{user});
+    say "Host:         ", val_or_undef($cfgobj->{host});
+    say "Destination:  ", val_or_undef($cfgobj->{dest});
+    if (not defined $cfgobj->{files}) {
+        say "No file specified yet";
+    } else {
+        say "Files:";
+        for my $f (keys %{$cfgobj->{files}}) {
+            say "    $f";
+        }
+    }
+}
+
+# Clear the config
+if ($clear) {
+    print "Are you sure you want to remove the config file ? ";
+    my $c = <STDIN>;
+    chomp $c;
+    if ($c eq "y") {
+        say "Removing configuration file...";
+        unlink($configfilepath) or die "$!";
+        $cfgobj = {};
+    }
+}
+
+# Save file
+my $js = encode_json ($cfgobj);
+open(my $cfgfile, '>', $configfilepath);
+print $cfgfile $js;
+close $cfgfile;
+
+
+
+
