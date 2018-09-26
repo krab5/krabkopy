@@ -46,7 +46,7 @@ Changing the kopy file :
 5. Send your files by running **kopy** with `-s`
 6. If you don't want to use **kopy** ever again in this directory, you can run `kopy -c`. Note that you will still have a configuration file in this directory, but containing an empty JSON (that is : {})
 
-**kopy** is a little bit smart on what it sends : if it detects that it already sent a file that has not been modified since the last copy, it will not send it again. This behaviour can be bypassed by using `-sr` isntead of `-s`.
+**kopy** is a little bit smart on what it sends : if it detects that it already sent a file that has not been modified since the last copy, it will not send it again. This behaviour can be bypassed by using `-sf` isntead of `-s`.
 
 When using `-f`, you can specify files, directories and wildcarded pathes. When using directories, you can use `-fr` instead of `-f` to recursively add directories. (Specifying `-fr` when using wildcards is useless; it will only check for files in the current directory, and will not go further).
 
